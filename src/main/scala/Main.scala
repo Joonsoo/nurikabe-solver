@@ -1,5 +1,5 @@
 
-// Created 2017-03-18 21:21 by Joonsoo Jeon
+// Created 2017-03-18 21:21
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -59,6 +59,8 @@ case class Board(lines: Seq[Line]) {
         number -> ((cells filter { _._2 == Belonged(number) }).keySet + pointer)
     }
 
+    def unsolvedNumbers: Set[Number] = numbers.keySet filter { number => belongedMap(number).size < number.count }
+
     def print(): Unit = {
         val cellTextSize = (lines flatMap { line =>
             line.cells map {
@@ -66,13 +68,14 @@ case class Board(lines: Seq[Line]) {
                 case _ => 1
             }
         }).max
+        println(("=" * (cellTextSize + 1)) * cols)
         lines foreach { line =>
             val cellString = line.cells map {
                 case Number(_, _, count) => count.toString
                 case Wall => "#"
                 case Empty => "."
                 case ShouldBeBelonged => "?"
-                case Belonged(_) => "!"
+                case Belonged(_) => "_"
                 case NotInterested => "X"
             }
             println(cellString map { s => " " * (cellTextSize - s.length) + s } mkString " ")
@@ -114,6 +117,9 @@ case class Board(lines: Seq[Line]) {
         })
     }
 
+    def adjacentFrom(row: Int, col: Int): Set[(Int, Int)] = {
+        Set((-1, 0), (1, 0), (0, -1), (0, 1)) map { p => (row + p._1, col + p._2) } filter { p => (p._1 >= 0) && (p._1 < rows) && (p._2 >= 0) && (p._2 < cols) }
+    }
     def adjacentFriendly(number: Number, row: Int, col: Int): Boolean = {
         // row,col 주변 4개(모서리이면 3개나 2개)의 cell이 다른 number에 속하지 않으면(벽이거나 비어있으면) true
         this(row, col) match {
@@ -132,9 +138,6 @@ case class Board(lines: Seq[Line]) {
                     }
                 }
         }
-    }
-    def adjacentFrom(row: Int, col: Int): Set[(Int, Int)] = {
-        Set((-1, 0), (1, 0), (0, -1), (0, 1)) map { p => (row + p._1, col + p._2) } filter { p => (p._1 >= 0) && (p._1 < rows) && (p._2 >= 0) && (p._2 < cols) }
     }
     def adjacent(points: Set[(Int, Int)]): Set[(Int, Int)] = {
         (points flatMap { p => adjacentFrom(p._1, p._2) }) -- points
@@ -160,7 +163,7 @@ case class Board(lines: Seq[Line]) {
         val occupations: Set[Occupation] = rec(number.count - occupied.size, occupied)
 
         val (common, cands) = OccupationsSet.extractCommons(occupations)
-        OccupationsSet(occupied, common, cands)
+        OccupationsSet(occupied, common, cands).filterValid(this)
     }
 
     lazy val wallChunks: Set[WallChunk] = {
@@ -197,7 +200,7 @@ case class Board(lines: Seq[Line]) {
 
         // 3. 2x2 wall이 없어야 하고
         val wallChunk = wallChunks.head
-        val no22: Boolean = ???
+        val no22: Boolean = wallChunk.no22
 
         // 4. 각 Number가 차지한 영역이 정확해야 함
         val correctNumbers = numbers.keySet forall { number => belongedMap(number).size == number.count }
@@ -206,7 +209,9 @@ case class Board(lines: Seq[Line]) {
     }
 
     def isFailed: Boolean = {
-        ???
+        val exists22 = wallChunks exists { wc => !wc.no22 }
+
+        exists22
     }
 }
 object Board {
@@ -227,6 +232,11 @@ object Board {
 
 case class Occupation(belonged: Set[(Int, Int)], border: Set[(Int, Int)]) {
     def +(other: Occupation): Occupation = Occupation(belonged ++ other.belonged, border ++ other.border)
+    def toUpdates(number: Number, update: BoardUpdate): BoardUpdate = {
+        belonged foreach { p => update(p) = Belonged(number) }
+        border foreach { p => update(p) = Wall }
+        update
+    }
 }
 case class OccupationsSet(occupied: Set[(Int, Int)], common: Occupation, cands: Set[Occupation]) {
     // assert(cands forall { cand => (occupied.size + common.belonged.size + cand.belonged.size) == number.size })
@@ -246,10 +256,23 @@ case class OccupationsSet(occupied: Set[(Int, Int)], common: Occupation, cands: 
         } else {
             val filteredCands = cands filter { _.belonged contains pointer }
             if (filteredCands.isEmpty) None else {
-                // TODO filteredCands중 common한 부분이 생겼을 경우 고려
+                // filteredCands중 common한 부분이 생겼을 경우 고려
                 val (newCommons, newCands) = OccupationsSet.extractCommons(filteredCands)
                 Some(OccupationsSet(occupied, common + newCommons, filteredCands ++ newCands))
             }
+        }
+    }
+    def filterValid(board: Board): OccupationsSet = {
+        // cands중 인접하지 않은 Occupation을 만들어내는 것들을 걸러냄
+        val validCands: Set[Occupation] = cands filter { cand =>
+            val cells = occupied ++ common.belonged ++ cand.belonged
+            cells forall { cell =>
+                (board.adjacentFrom(cell._1, cell._2) intersect cells).nonEmpty
+            }
+        }
+        if (validCands.size == cands.size) this else {
+            val (newCommons, newCands) = OccupationsSet.extractCommons(validCands)
+            OccupationsSet(occupied, common + newCommons, validCands ++ newCands)
         }
     }
 }
@@ -268,7 +291,12 @@ object OccupationsSet {
         }
     }
 }
-case class WallChunk(walls: Set[(Int, Int)])
+case class WallChunk(walls: Set[(Int, Int)]) {
+    def no22: Boolean =
+        !(walls exists { w =>
+            Set((1, 0), (0, 1), (1, 1)) forall { p => walls contains ((w._1 + p._1, w._2 + p._2)) }
+        })
+}
 
 class Solver(board: Board) {
     lazy val numberOccs: Map[Number, OccupationsSet] =
@@ -285,7 +313,7 @@ class Solver(board: Board) {
 
         // Number에서 도달 불가능한 cell들의 위치 계산
         val unreachableEmptyCells: Set[(Int, Int)] = board.cells.keySet filter { p => !(numberOccs exists { _._2.reachable(p._1, p._2) }) }
-        println(s"unreachableEmptyCells: $unreachableEmptyCells")
+        //        println(s"unreachableEmptyCells: $unreachableEmptyCells")
         // 1. unreachableEmptyCells에 벽 설치
         unreachableEmptyCells foreach { unreachable =>
             updates(unreachable) = Wall
@@ -295,11 +323,11 @@ class Solver(board: Board) {
         numberOccs foreach { pair =>
             val (number, occ) = pair
             if (occ.common.belonged.nonEmpty) {
-                println(s"commonCells: $number, ${occ.common.belonged}")
+                //                println(s"commonCells: $number, ${occ.common.belonged}")
                 occ.common.belonged foreach { p => updates(p) = Belonged(number) }
             }
             if (occ.common.border.nonEmpty) {
-                println(s"commonBorders: $number, ${occ.common.border}")
+                //                println(s"commonBorders: $number, ${occ.common.border}")
                 occ.common.border foreach { p => updates(p) = Wall }
             }
         }
@@ -309,15 +337,23 @@ class Solver(board: Board) {
             val empties = board.emptyAdjacents(wallChunk)
             if (empties.size == 1) {
                 val empty = empties.head
-                println(s"oneEmptyAdjacent: $empty")
+                //                println(s"oneEmptyAdjacent: $empty")
                 updates(empty) = Wall
             }
         }
 
         // TODO ㄱ자 모양의 벽이 있으면 빈 한 칸을 ShouldBeBelonged로 fill
 
-        // TODO ShouldBeBelonged인 셀에 도달 가능한 number가 하나뿐이면 Belonged로 fill.
-        // TODO - 이 때 이 지점에 도달 가능한 OccupationsSet에서 common한 부분들 Belonged로 fill
+        // ShouldBeBelonged인 셀에 도달 가능한 number가 하나뿐이면 Belonged로 fill.
+        // TODO - 이 때 이 지점에 도달 가능한 OccupationsSet에서 common한 부분들 Belonged로 fill -> 필요한가?
+        val shouldBeBelonged = board.cells filter { _._2 == ShouldBeBelonged }
+        shouldBeBelonged foreach { pair =>
+            val (pointer, _) = pair
+            if (reachableNumbers(pointer).size == 1) {
+                val number = reachableNumbers(pointer).head
+                //                println(s"onlyReachableNumber: $pointer $number")
+            }
+        }
 
         (board.update(updates), updates.updatesNumber != initialUpdatesVersion)
     }
@@ -332,22 +368,51 @@ class Solver(board: Board) {
 }
 
 object Main {
+    val hard22: Board = Board.fromString(Seq(
+        ". 3 . . . . . 2 .",
+        ". . . . 5 . . . .",
+        ". . . . . . . . .",
+        ". . . 2 . . . . 5",
+        ". . . . 2 . . . .",
+        ". . . . . . . . .",
+        ". 4 . . . . . 1 .",
+        "1 . . 2 . . 5 . .",
+        ". . . . . . . . .",
+        ". . . . 1 . . . .",
+        "4 . . . . . . . .",
+        ". . . . 4 . . . .",
+        "5 . . . . . . . 2"
+    ))
+    val hard23: Board = Board.fromString(Seq(
+        ". . . . 5 . . . .",
+        ". . . . . . . . 2",
+        ". . 2 . . . . . .",
+        "7 . . . . . . . .",
+        ". . 2 . . . . 6 .",
+        ". . . . . . 2 . .",
+        ". 2 . . . . . . .",
+        ". . . 4 . . . . .",
+        "4 . . . . . . . 2",
+        ". . . . . . . . .",
+        ". . . . . . 4 . .",
+        "3 . 2 . . 3 . . .",
+        ". . . 1 . . . 4 ."
+    ))
+    val normal14: Board = Board.fromString(Seq(
+        ". . . 4 . 5 .",
+        ". . . . . . .",
+        ". . 2 . . . .",
+        ". . . . . 3 .",
+        ". . . 3 . . .",
+        ". . . . . . .",
+        ". . 2 . . . .",
+        ". . . 6 . . .",
+        ". . 1 . . . .",
+        "2 . . . . 1 ."
+    ))
+
     def main(args: Array[String]): Unit = {
-        val board = Board.fromString(Seq(
-            ". 3 . . . . . 2 .",
-            ". . . . 5 . . . .",
-            ". . . . . . . . .",
-            ". . . 2 . . . . 5",
-            ". . . . 2 . . . .",
-            ". . . . . . . . .",
-            ". 4 . . . . . 1 .",
-            "1 . . 2 . . 5 . .",
-            ". . . . . . . . .",
-            ". . . . 1 . . . .",
-            "4 . . . . . . . .",
-            ". . . . 4 . . . .",
-            "5 . . . . . . . 2"
-        ))
+        val board = hard23
         board.print()
         //        val number = board.numbers.last
         //        println(number)
@@ -355,18 +420,60 @@ object Main {
         //        board.printReachableCells(number._1)
 
         def trySolve(board: Board): (Board, Boolean) = {
-            val (afterBoard, updated) = new Solver(board).fillObvious()
-            afterBoard.print()
-            println(s"updated: $updated")
-            println(s"wallChunks: ${board.wallChunks}")
+            val solver = new Solver(board)
+
+            //            println("*************************")
+            //            println(solver.numberOccs(Number(12, 0, 5)))
+            //            println(board(9, 1))
+            //            println(solver.numberOccs(Number(10, 0, 4)))
+            //            println()
+
+            val (afterBoard, updated) = solver.fillObvious()
+            //            afterBoard.print()
+            //            println(s"updated: $updated")
+            //            println(s"wallChunks: ${board.wallChunks}")
             (afterBoard, updated)
         }
+
         def solveUntilStable(board: Board): Board = {
             val (newBoard, updated) = trySolve(board)
             if (updated) solveUntilStable(newBoard) else newBoard
         }
+
         val lastBoard = solveUntilStable(board)
-        val s = new Solver(lastBoard)
-        println(s.numberOccs(Number(12, 0, 5)))
+        println("Obvious Filled:")
+        lastBoard.print()
+
+        def bruteforce(board: Board, trace: List[String]): Unit = {
+            println(trace mkString " <- ")
+            if (board.isSolved) {
+                board.print()
+                println("Solved!")
+                System.exit(0)
+            } else {
+                val unsolvedNumbers = board.unsolvedNumbers.toSeq
+                val occs = unsolvedNumbers map { number => number -> board.occupationsSet(number) } sortBy { x => x._2.cands.size }
+
+                occs foreach { numberOccs =>
+                    val (number, occupationsSet) = numberOccs
+                    val cands = occupationsSet.cands.toSeq
+
+                    def tryOccupation(occupation: Occupation, traceText: String): Unit = {
+                        val board1 = board.update(occupation.toUpdates(number, new BoardUpdate(board)))
+                        val board2 = solveUntilStable(board1)
+                        if (!board2.isFailed) {
+                            board2.print()
+                            bruteforce(board2, traceText +: trace)
+                        }
+                    }
+
+                    cands.zipWithIndex foreach { candIdx =>
+                        val (cand, idx) = candIdx
+                        tryOccupation(cand, s"$number($idx/${cands.size})")
+                    }
+                }
+            }
+        }
+        bruteforce(lastBoard, List())
     }
 }

@@ -7,7 +7,7 @@ import scala.collection.mutable.ArrayBuffer
 sealed trait Cell
 sealed trait Occupiable extends Cell
 
-case class Number(id: Int, count: Int) extends Cell
+case class Number(row: Int, col: Int, count: Int) extends Cell
 case object Wall extends Cell
 case object Empty extends Cell with Occupiable
 case object ShouldBeBelonged extends Cell with Occupiable
@@ -62,13 +62,13 @@ case class Board(lines: Seq[Line]) {
     def print(): Unit = {
         val cellTextSize = (lines flatMap { line =>
             line.cells map {
-                case Number(_, count) => count.toString.length
+                case Number(_, _, count) => count.toString.length
                 case _ => 1
             }
         }).max
         lines foreach { line =>
             val cellString = line.cells map {
-                case Number(_, count) => count.toString
+                case Number(_, _, count) => count.toString
                 case Wall => "#"
                 case Empty => "."
                 case ShouldBeBelonged => "?"
@@ -116,15 +116,21 @@ case class Board(lines: Seq[Line]) {
 
     def adjacentFriendly(number: Number, row: Int, col: Int): Boolean = {
         // row,col 주변 4개(모서리이면 3개나 2개)의 cell이 다른 number에 속하지 않으면(벽이거나 비어있으면) true
-        (adjacentFrom(row, col) + ((row, col))) forall { p =>
-            this(p._1, p._2) match {
-                case r: Number => r == number
-                case Belonged(r) => r == number
-                case Wall => true
-                case Empty => true
-                case ShouldBeBelonged => true
-                case NotInterested => true
-            }
+        this(row, col) match {
+            case r: Number => false
+            case Belonged(r) => r == number
+            case Wall => false
+            case _ =>
+                adjacentFrom(row, col) forall { p =>
+                    this(p._1, p._2) match {
+                        case r: Number => r == number
+                        case Belonged(r) => r == number
+                        case Wall => true
+                        case Empty => true
+                        case ShouldBeBelonged => true
+                        case NotInterested => true
+                    }
+                }
         }
     }
     def adjacentFrom(row: Int, col: Int): Set[(Int, Int)] = {
@@ -205,14 +211,13 @@ case class Board(lines: Seq[Line]) {
 }
 object Board {
     def fromString(lines: Seq[String]): Board = {
-        var numberId: Int = 0
-        val cellLines = lines map { line =>
+        val cellLines = lines.zipWithIndex map { lineIdx =>
+            val (line, row) = lineIdx
             val splitted = line.split("\\s+")
-            val cells: Seq[Cell] = splitted map {
-                case "." => Empty
-                case n =>
-                    numberId += 1
-                    Number(numberId, n.toInt)
+            val cells: Seq[Cell] = splitted.zipWithIndex map {
+                case (".", _) => Empty
+                case (n, col) =>
+                    Number(row, col, n.toInt)
             }
             Line(cells)
         }
@@ -356,10 +361,12 @@ object Main {
             println(s"wallChunks: ${board.wallChunks}")
             (afterBoard, updated)
         }
-        def solveUntilStable(board: Board): Unit = {
+        def solveUntilStable(board: Board): Board = {
             val (newBoard, updated) = trySolve(board)
-            if (updated) solveUntilStable(newBoard)
+            if (updated) solveUntilStable(newBoard) else newBoard
         }
-        solveUntilStable(board)
+        val lastBoard = solveUntilStable(board)
+        val s = new Solver(lastBoard)
+        println(s.numberOccs(Number(12, 0, 5)))
     }
 }

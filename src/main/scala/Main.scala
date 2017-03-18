@@ -3,6 +3,7 @@
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.io.Source
 
 sealed trait Cell
 sealed trait Occupiable extends Cell
@@ -150,12 +151,21 @@ case class Board(lines: Seq[Line]) {
         val occupied = belongedMap(number)
         // occupied는 모두 인접해있음
 
-        // TODO friendly 캐싱
+        val cache = mutable.Map[(Int, Int), Boolean]()
+        def _adjacentFriendly(pointer: (Int, Int)): Boolean =
+            cache get pointer match {
+                case Some(v) => v
+                case None =>
+                    val v = adjacentFriendly(number, pointer._1, pointer._2)
+                    cache(pointer) = v
+                    v
+            }
+
         // TODO 일단 무식하게 해놓고 필요하면 개선해야지..
         // TODO 일단 cells의 adjacentFriendly 구하는 부분을 재사용해서 줄일 수 있을 것 같다
         def rec(needed: Int, cells: Set[(Int, Int)]): Set[Occupation] =
             if (needed == 0) Set(Occupation(cells -- occupied, borderOf(cells))) else {
-                val adjacents = adjacent(cells) filter { p => adjacentFriendly(number, p._1, p._2) }
+                val adjacents = adjacent(cells) filter { _adjacentFriendly }
                 adjacents.foldLeft(Set[Occupation]()) { (cc, pointer) => cc ++ rec(needed - 1, cells + pointer) }
             }
 
@@ -412,26 +422,33 @@ object Main {
     ))
 
     def main(args: Array[String]): Unit = {
-        val board = hard23
-        board.print()
-        //        val number = board.numbers.last
+        if (args.length != 1) {
+            println("Usage: sbt \"run <quiz file name>\"")
+            System.exit(1)
+        }
+
+        val lines = Source.fromFile(args(0)).getLines().toSeq map { _.trim } filter { _.nonEmpty }
+        val input = Board.fromString(lines)
+
+        input.print()
+        //        val number = input.numbers.last
         //        println(number)
-        //        board.printFriendlyCells(number._1)
-        //        board.printReachableCells(number._1)
+        //        input.printFriendlyCells(number._1)
+        //        input.printReachableCells(number._1)
 
         def trySolve(board: Board): (Board, Boolean) = {
             val solver = new Solver(board)
 
             //            println("*************************")
             //            println(solver.numberOccs(Number(12, 0, 5)))
-            //            println(board(9, 1))
+            //            println(input(9, 1))
             //            println(solver.numberOccs(Number(10, 0, 4)))
             //            println()
 
             val (afterBoard, updated) = solver.fillObvious()
             //            afterBoard.print()
             //            println(s"updated: $updated")
-            //            println(s"wallChunks: ${board.wallChunks}")
+            //            println(s"wallChunks: ${input.wallChunks}")
             (afterBoard, updated)
         }
 
@@ -440,11 +457,11 @@ object Main {
             if (updated) solveUntilStable(newBoard) else newBoard
         }
 
-        val lastBoard = solveUntilStable(board)
+        val lastBoard = solveUntilStable(input)
         println("Obvious Filled:")
         lastBoard.print()
 
-        def bruteforce(board: Board, trace: List[String]): Unit = {
+        def dfs(board: Board, trace: List[String]): Unit = {
             println(trace mkString " <- ")
             if (board.isSolved) {
                 board.print()
@@ -460,10 +477,13 @@ object Main {
 
                     def tryOccupation(occupation: Occupation, traceText: String): Unit = {
                         val board1 = board.update(occupation.toUpdates(number, new BoardUpdate(board)))
-                        val board2 = solveUntilStable(board1)
-                        if (!board2.isFailed) {
-                            board2.print()
-                            bruteforce(board2, traceText +: trace)
+                        // TODO board.update를 할 때 occupationsSet 중 영향을 받을 것은 몇 개 없으니 영향 받지 않는 것들은 추려서 재사용하도록 수정하자
+                        if (!board1.isFailed) {
+                            val board2 = solveUntilStable(board1)
+                            if (!board2.isFailed) {
+                                board2.print()
+                                dfs(board2, traceText +: trace)
+                            }
                         }
                     }
 
@@ -474,6 +494,9 @@ object Main {
                 }
             }
         }
-        bruteforce(lastBoard, List())
+
+        println("Starting to solve the quiz..")
+        dfs(lastBoard, List())
+        //        bfs(List((lastBoard, List())))
     }
 }

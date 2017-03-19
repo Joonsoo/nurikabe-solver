@@ -300,6 +300,7 @@ case class OccupationsSet(occupied: Set[(Int, Int)], common: Occupation, cands: 
                 (board.adjacentFrom(cell._1, cell._2) intersect cells).nonEmpty
             }
         }
+        // TODO border때문에 invalid해지는 것들도 거르기
         if (validCands.size == cands.size) this else {
             val (newCommons, newCands) = OccupationsSet.extractCommons(validCands)
             OccupationsSet(occupied, common + newCommons, newCands)
@@ -481,8 +482,8 @@ class Solver(board: Board) {
                 }
             }).toSet filter { pointer => uboard(pointer._1, pointer._2) == Empty }
             if (newShouldBeBelonged.nonEmpty) {
-                board.print()
-                println(s"newShouldBeBelonged:$newShouldBeBelonged $failed")
+                //                board.print()
+                //                println(s"newShouldBeBelonged:$newShouldBeBelonged $failed")
                 if (!failed) {
                     newShouldBeBelonged foreach { p =>
                         checkAndUpdate(p, ShouldBeBelonged)
@@ -627,7 +628,7 @@ object Main {
 
                     cands.zipWithIndex foreach { candIdx =>
                         val (cand, idx) = candIdx
-                        tryOccupation(cand, s"$number($idx/${cands.size})")
+                        tryOccupation(cand, s"$number(${idx + 1}/${cands.size})")
                     }
                 }
             }

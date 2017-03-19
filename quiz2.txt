@@ -1,3 +1,4 @@
+-- source: https://en.wikipedia.org/wiki/Nurikabe_(puzzle)
 1 . . . 4 . . 4 . 2
 . . . . . . . . . .
 . 1 . . . 2 . . . .

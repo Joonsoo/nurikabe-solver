@@ -38,7 +38,7 @@ class BoardUpdate(board: Board) {
 case class Line(cells: Seq[Cell]) {
     def apply(col: Int): Cell = cells(col)
 }
-case class Board(lines: Seq[Line]) {
+case class Board(lines: Seq[Line], prevNumberOccs: Option[Map[Number, OccupationsSet]]) {
     assert((lines map { _.cells.length }).toSet.size == 1)
     val rows: Int = lines.length
     val cols: Int = lines.head.cells.length
@@ -60,7 +60,23 @@ case class Board(lines: Seq[Line]) {
         number -> ((cells filter { _._2 == Belonged(number) }).keySet + pointer)
     }
 
-    def unsolvedNumbers: Set[Number] = numbers.keySet filter { number => belongedMap(number).size < number.count }
+    lazy val unsolvedNumbers: Set[Number] = numbers.keySet filter { number => belongedMap(number).size < number.count }
+
+    lazy val _numberOccs: Option[Map[Number, OccupationsSet]] =
+        prevNumberOccs match {
+            case Some(prev) =>
+                val list = (prev map { kv =>
+                    val (number, occs) = kv
+                    if (unsolvedNumbers contains number) {
+                        occs.filterFriendly(number, this) map { newOccs => number -> newOccs }
+                    } else {
+                        Some(number -> OccupationsSet(belongedMap(number), Occupation(Set(), Set()), Set()))
+                    }
+                }).toSeq
+                if (list contains None) None else Some((list map { _.get }).toMap)
+            case None => Some((numbers.keys map { number => number -> occupationsSet(number) }).toMap)
+        }
+    lazy val numberOccs: Map[Number, OccupationsSet] = _numberOccs.get
 
     def print(): Unit = {
         val cellTextSize = (lines flatMap { line =>
@@ -69,8 +85,9 @@ case class Board(lines: Seq[Line]) {
                 case _ => 1
             }
         }).max
-        println(("=" * (cellTextSize + 1)) * cols)
-        lines foreach { line =>
+        println("     " + ("=" * ((cellTextSize + 1) * cols - 1)))
+        lines.zipWithIndex foreach { lineIdx =>
+            val (line, idx) = lineIdx
             val cellString = line.cells map {
                 case Number(_, _, count) => count.toString
                 case Wall => "#"
@@ -79,7 +96,7 @@ case class Board(lines: Seq[Line]) {
                 case Belonged(_) => "_"
                 case NotInterested => "X"
             }
-            println(cellString map { s => " " * (cellTextSize - s.length) + s } mkString " ")
+            println(f"$idx%2d | " + (cellString map { s => " " * (cellTextSize - s.length) + s } mkString " "))
         }
     }
 
@@ -115,7 +132,7 @@ case class Board(lines: Seq[Line]) {
                 }
             }
             Line(newLine)
-        })
+        }, Some(numberOccs))
     }
 
     def adjacentFrom(row: Int, col: Int): Set[(Int, Int)] = {
@@ -221,7 +238,9 @@ case class Board(lines: Seq[Line]) {
     def isFailed: Boolean = {
         val exists22 = wallChunks exists { wc => !wc.no22 }
 
-        exists22
+        val unsatisfiableNumbers = _numberOccs.isEmpty
+
+        exists22 || unsatisfiableNumbers
     }
 }
 object Board {
@@ -231,12 +250,13 @@ object Board {
             val splitted = line.split("\\s+")
             val cells: Seq[Cell] = splitted.zipWithIndex map {
                 case (".", _) => Empty
+                case ("#", _) => Wall
                 case (n, col) =>
                     Number(row, col, n.toInt)
             }
             Line(cells)
         }
-        Board(cellLines)
+        Board(cellLines, None)
     }
 }
 
@@ -268,7 +288,7 @@ case class OccupationsSet(occupied: Set[(Int, Int)], common: Occupation, cands: 
             if (filteredCands.isEmpty) None else {
                 // filteredCands중 common한 부분이 생겼을 경우 고려
                 val (newCommons, newCands) = OccupationsSet.extractCommons(filteredCands)
-                Some(OccupationsSet(occupied, common + newCommons, filteredCands ++ newCands))
+                Some(OccupationsSet(occupied, common + newCommons, newCands))
             }
         }
     }
@@ -282,14 +302,23 @@ case class OccupationsSet(occupied: Set[(Int, Int)], common: Occupation, cands: 
         }
         if (validCands.size == cands.size) this else {
             val (newCommons, newCands) = OccupationsSet.extractCommons(validCands)
-            OccupationsSet(occupied, common + newCommons, validCands ++ newCands)
+            OccupationsSet(occupied, common + newCommons, newCands)
         }
+    }
+    def filterFriendly(number: Number, board: Board): Option[OccupationsSet] = {
+        val commonFriendly = common.belonged forall { p => board.adjacentFriendly(number, p._1, p._2) }
+        if (commonFriendly) {
+            val friendlyCands = cands filter { cand => cand.belonged forall { p => board.adjacentFriendly(number, p._1, p._2) } }
+            if (friendlyCands.isEmpty) None else {
+                val (newCommons, newCands) = OccupationsSet.extractCommons(friendlyCands)
+                Some(OccupationsSet(occupied, common + newCommons, newCands))
+            }
+        } else None
     }
 }
 object OccupationsSet {
     def extractCommons(occupations: Set[Occupation]): (Occupation, Set[Occupation]) = {
         // cands 중 공통인 부분들을 common으로 분리
-        // TODO
         val cellsMap = occupations flatMap { occ => occ.belonged map { belonged => occ -> belonged } } groupBy { _._2 } mapValues { _ map { _._1 } }
         val commonCells = (cellsMap filter { _._2.size == occupations.size }).keySet
         val bordersMap = occupations flatMap { occ => occ.border map { border => occ -> border } } groupBy { _._2 } mapValues { _ map { _._1 } }
@@ -309,63 +338,163 @@ case class WallChunk(walls: Set[(Int, Int)]) {
 }
 
 class Solver(board: Board) {
-    lazy val numberOccs: Map[Number, OccupationsSet] =
-        (board.numbers.keys map { number => number -> board.occupationsSet(number) }).toMap
-
-    lazy val reachableNumbers: Map[(Int, Int), Set[Number]] =
-        numberOccs.toSet flatMap { (kv: (Number, OccupationsSet)) =>
-            kv._2.allReachables map { r => (kv._1, r) }
-        } groupBy { _._2 } mapValues { x => x map { _._1 } }
-
-    def fillObvious(): (Board, Boolean) = {
+    def fillObvious(): Option[(Board, Boolean)] = {
+        var failed: Boolean = false
         val updates = new BoardUpdate(board)
         val initialUpdatesVersion = updates.updatesNumber
 
+        // updates가 inconsistent하면 failed
+        def checkAndUpdate(pointer: (Int, Int), newCell: Cell): Unit = {
+            def canReplace(prev: Cell, newValue: Cell): Boolean = {
+                if (prev == Empty) true
+                else if (prev == newValue) true
+                else if (prev == ShouldBeBelonged && newCell.isInstanceOf[Belonged]) true
+                else {
+                    false
+                }
+            }
+            if (!failed) {
+                val prevCell = board(pointer._1, pointer._2)
+                if (prevCell != newCell) {
+                    updates(pointer._1, pointer._2) match {
+                        case Some(ucell) =>
+                            if (!canReplace(ucell, newCell)) {
+                                failed = true
+                            } else {
+                                updates(pointer) = newCell
+                            }
+                        case None =>
+                            updates(pointer) = newCell
+                    }
+                } else if (!canReplace(prevCell, newCell)) {
+                    failed = true
+                }
+            }
+        }
+
+        def uboard(row: Int, col: Int): Cell =
+            updates(row, col) match {
+                case None => board(row, col)
+                case Some(v) => v
+            }
+
         // Number에서 도달 불가능한 cell들의 위치 계산
-        val unreachableEmptyCells: Set[(Int, Int)] = board.cells.keySet filter { p => !(numberOccs exists { _._2.reachable(p._1, p._2) }) }
+        val unreachableEmptyCells: Set[(Int, Int)] = board.cells.keySet filter { p => !(board.numberOccs exists { _._2.reachable(p._1, p._2) }) }
         //        println(s"unreachableEmptyCells: $unreachableEmptyCells")
         // 1. unreachableEmptyCells에 벽 설치
         unreachableEmptyCells foreach { unreachable =>
-            updates(unreachable) = Wall
+            checkAndUpdate(unreachable, Wall)
         }
 
         // 각 Number의 OccupationsSet에서 common인 부분들 Belonged나 Wall로 fill
-        numberOccs foreach { pair =>
-            val (number, occ) = pair
-            if (occ.common.belonged.nonEmpty) {
-                //                println(s"commonCells: $number, ${occ.common.belonged}")
-                occ.common.belonged foreach { p => updates(p) = Belonged(number) }
-            }
-            if (occ.common.border.nonEmpty) {
-                //                println(s"commonBorders: $number, ${occ.common.border}")
-                occ.common.border foreach { p => updates(p) = Wall }
+        board.numberOccs foreach { pair =>
+            if (!failed) {
+                val (number, occ) = pair
+                if (occ.common.belonged.nonEmpty) {
+                    //                println(s"commonCells: $number, ${occ.common.belonged}")
+                    occ.common.belonged foreach { p => checkAndUpdate(p, Belonged(number)) }
+                }
+                if (occ.common.border.nonEmpty) {
+                    //                println(s"commonBorders: $number, ${occ.common.border}")
+                    occ.common.border foreach { p => checkAndUpdate(p, Wall) }
+                }
             }
         }
 
-        // TODO 둘러싼 공간 중 Empty가 하나밖에 없는 WallChunk가 있으면 그 빈 칸에 Wall
+        // 둘러싼 공간 중 Empty가 하나밖에 없는 WallChunk가 있으면 그 빈 칸에 Wall
         board.wallChunks foreach { wallChunk =>
-            val empties = board.emptyAdjacents(wallChunk)
-            if (empties.size == 1) {
-                val empty = empties.head
-                //                println(s"oneEmptyAdjacent: $empty")
-                updates(empty) = Wall
+            if (!failed) {
+                val empties = board.emptyAdjacents(wallChunk)
+                if (empties.size == 1) {
+                    val empty = empties.head
+                    //                println(s"oneEmptyAdjacent: $empty")
+                    checkAndUpdate(empty, Wall)
+                }
             }
         }
-
-        // TODO ㄱ자 모양의 벽이 있으면 빈 한 칸을 ShouldBeBelonged로 fill
 
         // ShouldBeBelonged인 셀에 도달 가능한 number가 하나뿐이면 Belonged로 fill.
-        // TODO - 이 때 이 지점에 도달 가능한 OccupationsSet에서 common한 부분들 Belonged로 fill -> 필요한가?
-        val shouldBeBelonged = board.cells filter { _._2 == ShouldBeBelonged }
-        shouldBeBelonged foreach { pair =>
-            val (pointer, _) = pair
-            if (reachableNumbers(pointer).size == 1) {
-                val number = reachableNumbers(pointer).head
-                //                println(s"onlyReachableNumber: $pointer $number")
+        //  - 이 때 이 지점에 도달 가능한 OccupationsSet에서 common한 부분들 fill
+        lazy val reachableNumbers: Map[(Int, Int), Set[Number]] =
+            board.numberOccs.toSet flatMap { (kv: (Number, OccupationsSet)) =>
+                kv._2.allReachables map { r => (kv._1, r) }
+            } groupBy { _._2 } mapValues { x => x map { _._1 } }
+        def tryFillShouldBeBelonged(pointer: (Int, Int)): Unit = {
+            if (!failed) {
+                reachableNumbers get pointer match {
+                    case Some(sets) if sets.size == 1 =>
+                        //                board.print()
+                        //                println(reachableNumbers(pointer))
+                        val number = reachableNumbers(pointer).head
+                        board.numberOccs(number).filterReachables(pointer._1, pointer._2) match {
+                            case Some(newOccs) =>
+                                newOccs.common.belonged foreach { p =>
+                                    checkAndUpdate(p, Belonged(number))
+                                }
+                                newOccs.common.border foreach { p =>
+                                    checkAndUpdate(p, Wall)
+                                }
+                            case None => failed = true
+                        }
+                    //                        println(s"onlyReachableNumber: $pointer $number")
+                    case Some(_) => // 현재로써는 할 수 있는게 없음
+                    case None =>
+                        failed = true
+                }
             }
         }
 
-        (board.update(updates), updates.updatesNumber != initialUpdatesVersion)
+        if (!failed) {
+            // 맵에 shouldBeBelonged인 지점이 있으면 모두 채우기 시도
+            val shouldBeBelonged = (board.cells filter { _._2 == ShouldBeBelonged }).keySet
+            shouldBeBelonged foreach { pointer =>
+                tryFillShouldBeBelonged(pointer)
+            }
+        }
+
+        // ㄱ자 모양의 벽이 있으면 빈 한 칸을 ShouldBeBelonged로 fill하고 채우기 시도
+        if (!failed) {
+            val newShouldBeBelonged: Set[(Int, Int)] = ((0 until (board.rows - 1)) flatMap { row =>
+                (0 until (board.cols - 1)) flatMap { col =>
+                    if (!failed) {
+                        val cell1 = board(row, col) == Wall
+                        val cell2 = board(row + 1, col) == Wall
+                        val cell3 = board(row, col + 1) == Wall
+                        val cell4 = board(row + 1, col + 1) == Wall
+                        val walls = (if (cell1) 1 else 0) + (if (cell2) 1 else 0) + (if (cell3) 1 else 0) + (if (cell4) 1 else 0)
+                        if (walls == 3) {
+                            if (!cell1) {
+                                Some(row, col)
+                            } else if (!cell2) {
+                                Some(row + 1, col)
+                            } else if (!cell3) {
+                                Some((row, col + 1))
+                            } else {
+                                assert(!cell4)
+                                Some(row + 1, col + 1)
+                            }
+                        } else if (walls == 4) {
+                            failed = true
+                            None
+                        } else None
+                    } else None
+                }
+            }).toSet filter { pointer => uboard(pointer._1, pointer._2) == Empty }
+            if (newShouldBeBelonged.nonEmpty) {
+                board.print()
+                println(s"newShouldBeBelonged:$newShouldBeBelonged $failed")
+                if (!failed) {
+                    newShouldBeBelonged foreach { p =>
+                        checkAndUpdate(p, ShouldBeBelonged)
+                    }
+                    newShouldBeBelonged foreach { p =>
+                        tryFillShouldBeBelonged(p)
+                    }
+                }
+            }
+        }
+
+        if (failed) None else Some(board.update(updates), updates.updatesNumber != initialUpdatesVersion)
     }
 
     def splitted(): Seq[Board] = {
@@ -427,7 +556,8 @@ object Main {
             System.exit(1)
         }
 
-        val lines = Source.fromFile(args(0)).getLines().toSeq map { _.trim } filter { _.nonEmpty }
+        val sourceFile = args(0)
+        val lines = Source.fromFile(sourceFile).getLines().toSeq map { _.trim } filter { _.nonEmpty } filterNot { _.startsWith("--") }
         val input = Board.fromString(lines)
 
         input.print()
@@ -436,7 +566,7 @@ object Main {
         //        input.printFriendlyCells(number._1)
         //        input.printReachableCells(number._1)
 
-        def trySolve(board: Board): (Board, Boolean) = {
+        def trySolve(board: Board): Option[(Board, Boolean)] = {
             val solver = new Solver(board)
 
             //            println("*************************")
@@ -445,24 +575,31 @@ object Main {
             //            println(solver.numberOccs(Number(10, 0, 4)))
             //            println()
 
-            val (afterBoard, updated) = solver.fillObvious()
-            //            afterBoard.print()
-            //            println(s"updated: $updated")
-            //            println(s"wallChunks: ${input.wallChunks}")
-            (afterBoard, updated)
+            solver.fillObvious() match {
+                case Some((afterBoard, updated)) =>
+                    //            afterBoard.print()
+                    //            println(s"updated: $updated")
+                    //            println(s"wallChunks: ${input.wallChunks}")
+                    Some(afterBoard, updated)
+                case None => None
+            }
         }
 
-        def solveUntilStable(board: Board): Board = {
-            val (newBoard, updated) = trySolve(board)
-            if (updated) solveUntilStable(newBoard) else newBoard
+        def solveUntilStable(board: Board): Option[Board] = {
+            trySolve(board) flatMap { pair =>
+                val (newBoard, updated) = pair
+                if (newBoard.isFailed) None else {
+                    if (updated) solveUntilStable(newBoard) else Some(newBoard)
+                }
+            }
         }
 
         val lastBoard = solveUntilStable(input)
         println("Obvious Filled:")
-        lastBoard.print()
+        lastBoard.get.print()
 
         def dfs(board: Board, trace: List[String]): Unit = {
-            println(trace mkString " <- ")
+            println(trace.reverse mkString " -> ")
             if (board.isSolved) {
                 board.print()
                 println("Solved!")
@@ -477,12 +614,13 @@ object Main {
 
                     def tryOccupation(occupation: Occupation, traceText: String): Unit = {
                         val board1 = board.update(occupation.toUpdates(number, new BoardUpdate(board)))
-                        // TODO board.update를 할 때 occupationsSet 중 영향을 받을 것은 몇 개 없으니 영향 받지 않는 것들은 추려서 재사용하도록 수정하자
                         if (!board1.isFailed) {
-                            val board2 = solveUntilStable(board1)
-                            if (!board2.isFailed) {
-                                board2.print()
-                                dfs(board2, traceText +: trace)
+                            solveUntilStable(board1) match {
+                                case Some(board2) =>
+                                    assert(!board2.isFailed)
+                                    board2.print()
+                                    dfs(board2, traceText +: trace)
+                                case _ => // do nothing
                             }
                         }
                     }
@@ -496,7 +634,7 @@ object Main {
         }
 
         println("Starting to solve the quiz..")
-        dfs(lastBoard, List())
+        dfs(lastBoard.get, List())
         //        bfs(List((lastBoard, List())))
     }
 }
